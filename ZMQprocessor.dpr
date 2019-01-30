@@ -5,12 +5,12 @@ program ZMQprocessor;
 {$R *.res}
 
 uses
-  System.SysUtils, System.Hash, Variants, zmq, zmqapi, superobject,
+  System.SysUtils, System.AnsiStrings, System.Hash, Variants, zmq, zmqapi, superobject,
   dm in 'dm.pas' {dmPG: TDataModule};
 
 var
   host, portPub, portSub: AnsiString;
-  dbhost, dbport, dbname, dbuser, dbpwd: AnsiString;
+  dbhost, dbport, dbname, dbuser, dbpwd: string;
   i, user_id: integer;
   context: TZMQContext;
   subscriber, translator: TZMQSocket;
@@ -18,8 +18,7 @@ var
   contentW: widestring;
   jsonObj: ISuperObject;
   sendStr: AnsiString;
-  sendStrW: WideString;
-  msgType, msgEmail, msgPwd, msgMsg_id, HashedPwd: AnsiString;
+  msgType, msgEmail, msgPwd, msgMsg_id: AnsiString;
   dmPG: TdmPG;
   LoginSuccess: boolean;
 
@@ -65,9 +64,11 @@ begin
         subscriber.Subscribe('api_in');
         subscriber.recv(filter);
         subscriber.recv(content);
+
+        // Библиотека superobject работает в widestring, поэтому тут конвертация из UTF8
         contentW := UTF8ToWideString(content);
 
-        jsonObj := TSuperObject.ParseString(PWideChar(contentW), True);
+        jsonObj := SO(contentW);
         try
           msgType  := jsonObj.S['type'];
           msgEmail := jsonObj.S['email'];
@@ -80,63 +81,63 @@ begin
         subscriber.Free;
       end;
 
-      if AnsiCompareText(msgType, 'login')=0 then begin
-        jsonObj := SO;
+      if System.AnsiStrings.AnsiCompareText(msgType, 'login')<>0 then Exit;
 
-        if (msgType='') or (msgEmail='') or (msgPwd='') or (msgMsg_id='') then begin
-          // Если тип ошибки "нет одного из полей или поля пустые" относится ко входному сообщению
-          jsonObj.S['msg_id'] := msgMsg_id;
-          jsonObj.S['status'] := 'error';
-          jsonObj.S['error']  := 'WRONG_FORMAT';
-        end else begin
-          // Проверки на наличие полей? Проверка чтобы passw и user_id были непустые? WRONG_FORMAT ?
-          LoginSuccess := False;
-          dmPG := TdmPG.Create(nil);
-          try
-            dmPG.fdConn.Params.Add('Server='+dbhost);
-            dmPG.fdConn.Params.Add('Port='+dbport);
-            dmPG.fdConn.Params.Database := dbname;
-            dmPG.fdConn.Params.UserName := dbuser;
-            dmPG.fdConn.Params.Password := dbpwd;
-            dmPG.fdConn.Connected := True;
-            dmPG.fdQuery.ParamByName('EMAIL').Value := msgEmail;
-            dmPG.fdQuery.Open;
-            if not dmPG.fdQuery.IsEmpty then
-              if not VarIsNull(dmPG.fdQuery['passw']) then                      // Пустое поле passw - это WRONG_FORMAT ?
-                if dmPG.fdQuery['passw']=System.Hash.THashMD5.GetHashString(msgPwd) then begin
-                  if not VarIsNull(dmPG.fdQuery['user_id']) then begin          // Пустое поле user_id - это WRONG_FORMAT ?
-                    user_id := dmPG.fdQuery['user_id'];
-                    LoginSuccess := True;
-                  end;
+      jsonObj := SO;
+
+      if (msgType='') or (msgEmail='') or (msgPwd='') or (msgMsg_id='') then begin
+        // Если тип ошибки "нет одного из полей или поля пустые" относится ко входному сообщению
+        jsonObj.S['msg_id'] := msgMsg_id;
+        jsonObj.S['status'] := 'error';
+        jsonObj.S['error']  := 'WRONG_FORMAT';
+      end else begin
+        // Проверки на наличие полей? Проверка чтобы passw и user_id были непустые? WRONG_FORMAT ?
+        LoginSuccess := False;
+        dmPG := TdmPG.Create(nil);
+        try
+          dmPG.fdConn.Params.Add('Server='+dbhost);
+          dmPG.fdConn.Params.Add('Port='+dbport);
+          dmPG.fdConn.Params.Database := dbname;
+          dmPG.fdConn.Params.UserName := dbuser;
+          dmPG.fdConn.Params.Password := dbpwd;
+          dmPG.fdConn.Connected := True;
+          dmPG.fdQuery.ParamByName('EMAIL').Value := msgEmail;
+          dmPG.fdQuery.Open;
+          if not dmPG.fdQuery.IsEmpty then
+            if not VarIsNull(dmPG.fdQuery['passw']) then                      // Пустое поле passw - это WRONG_FORMAT ?
+              if dmPG.fdQuery['passw']=System.Hash.THashMD5.GetHashString(msgPwd) then begin
+                if not VarIsNull(dmPG.fdQuery['user_id']) then begin          // Пустое поле user_id - это WRONG_FORMAT ?
+                  user_id := dmPG.fdQuery['user_id'];
+                  LoginSuccess := True;
                 end;
-          finally
-            dmPG.Free;
-          end;
-
-          if LoginSuccess then begin
-            jsonObj.S['msg_id']  := msgMsg_id;
-            jsonObj.I['user_id'] := user_id;
-            jsonObj.S['status']  := 'ok';
-          end else begin
-            jsonObj.S['msg_id'] := msgMsg_id;
-            jsonObj.S['status'] := 'ok';
-            jsonObj.S['error']  := 'WRONG_PWD';
-          end;
+              end;
+        finally
+          dmPG.Free;
         end;
 
-        // Отправка исходящего сообщения
-        translator := context.Socket(stPub);
-        try
-          sendStrW := jsonObj.AsJSon;
-          SetLength(sendStr, Length(sendStrW));
-          System.UnicodeToUtf8(PAnsiChar(sendStr), PWideChar(sendStrW), Length(sendStr)+1);
-          translator.bind('tcp://'+host+':'+portPub);
-          translator.send(['api_out', sendStr]);
-        finally
-          translator.Free;
+        if LoginSuccess then begin
+          jsonObj.S['msg_id']  := msgMsg_id;
+          jsonObj.I['user_id'] := user_id;
+          jsonObj.S['status']  := 'ok';
+        end else begin
+          jsonObj.S['msg_id'] := msgMsg_id;
+          jsonObj.S['status'] := 'ok';
+          jsonObj.S['error']  := 'WRONG_PWD';
         end;
       end;
+
+      // Отправка исходящего сообщения
+      translator := context.Socket(stPub);
+      try
+        sendStr := jsonObj.AsJSon;
+        translator.bind('tcp://'+host+':'+portPub);
+        translator.send(['api_out', sendStr]);
+      finally
+        translator.Free;
+      end;
+
     finally
+      Writeln('context.Free');
       context.Free;
     end;
   except
@@ -144,3 +145,4 @@ begin
       Writeln(E.ClassName, ': ', E.Message);
   end;
 end.
+
